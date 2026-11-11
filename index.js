@@ -4,6 +4,7 @@ const { Telegraf } = require('telegraf');
 const OpenAI = require('openai');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios');
 
 // ==================================================
 // CONFIGURATION
@@ -937,7 +938,7 @@ bot.command('portrait', async (ctx) => {
 
   if (messages.length < 3) {
     return ctx.reply(
-      '🧠 Пока недостаточно сообщений для анализа.\n\n' +
+      ' Пока недостаточно сообщений для анализа.\n\n' +
       'Пообщайся в чате и попробуй снова. ' +
       'Нужно минимум 3 сообщения.'
     );
@@ -956,7 +957,7 @@ bot.command('portrait', async (ctx) => {
     );
   }
 
-  await ctx.reply('🧠 Анализирую твои сообщения...');
+  await ctx.reply('🧠 Анализирую твои сообщения... (это займёт 5-10 секунд)');
 
   try {
     const conversation = messages
@@ -1005,7 +1006,7 @@ bot.command('portrait', async (ctx) => {
       ],
       temperature: 0.8,
       max_tokens: 1500,
-      reasoning_effort: 'low'
+      reasoning_effort: 'high'  // ← ИЗМЕНЕНИЕ: было 'low'
     });
 
     let portrait =
@@ -1259,6 +1260,171 @@ bot.command('rep_remove', (ctx) => modifyReputation(ctx, 'remove'));
 bot.command('rep_set', (ctx) => modifyReputation(ctx, 'set'));
 
 // ==================================================
+// WEATHER (Погода)
+// ==================================================
+
+bot.command('weather', async (ctx) => {
+  const city = ctx.message.text.replace('/weather', '').trim();
+
+  if (!city) {
+    return ctx.reply(
+      '🌤 Погода\n\n' +
+      'Примеры:\n' +
+      '/weather Москва\n' +
+      '/weather London'
+    );
+  }
+
+  const WEATHER_API_KEY = process.env.WEATHER_API_KEY;
+
+  if (!WEATHER_API_KEY) {
+    return ctx.reply('⚠️ API ключ погоды не настроен. Обратись к админу.');
+  }
+
+  try {
+    const geoResponse = await axios.get(
+      `http://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(city)}&limit=1&appid=${WEATHER_API_KEY}`
+    );
+
+    const geoData = geoResponse.data;
+
+    if (!geoData.length) {
+      return ctx.reply(`🌍 Город "${city}" не найден.`);
+    }
+
+    const { lat, lon, name } = geoData[0];
+
+    const weatherResponse = await axios.get(
+      `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${WEATHER_API_KEY}&units=metric&lang=ru`
+    );
+
+    const weather = weatherResponse.data;
+
+    const emojis = {
+      'Clear': '☀️',
+      'Clouds': '☁️',
+      'Rain': '🌧',
+      'Drizzle': '🌦',
+      'Thunderstorm': '⛈',
+      'Snow': '❄️',
+      'Mist': '🌫'
+    };
+
+    const main = weather.weather[0].main;
+    const emoji = emojis[main] || '🌡';
+
+    const text =
+      `${emoji} ${name}\n\n` +
+      `🌡 Температура: ${Math.round(weather.main.temp)}°C (ощущается как ${Math.round(weather.main.feels_like)}°C)\n` +
+      `📊 ${weather.weather[0].description}\n` +
+      `💧 Влажность: ${weather.main.humidity}%\n` +
+      `💨 Ветер: ${Math.round(weather.wind.speed)} м/с`;
+
+    await ctx.reply(text);
+  } catch (error) {
+    console.error('Weather error:', error.message);
+    await ctx.reply('❌ Ошибка получения погоды. Попробуй позже.');
+  }
+});
+
+// ==================================================
+// CURRENCY RATES (Курсы валют)
+// ==================================================
+
+bot.command('rate', async (ctx) => {
+  try {
+    const response = await axios.get('https://open.er-api.com/v6/latest/RUB');
+    const data = response.data;
+
+    if (data.result !== 'success') {
+      throw new Error('API вернул ошибку: ' + data.result);
+    }
+
+    const text =
+      '💱 Курсы валют (1 RUB =)\n\n' +
+      `🇺🇸 USD: ${data.rates.USD.toFixed(4)}\n` +
+      `🇪🇺 EUR: ${data.rates.EUR.toFixed(4)}\n` +
+      `🇨🇳 CNY: ${data.rates.CNY.toFixed(4)}\n` +
+      `🇰🇿 KZT: ${data.rates.KZT.toFixed(2)}\n\n` +
+      `Данные на ${new Date().toLocaleString('ru-RU')}`;
+
+    await ctx.reply(text);
+  } catch (error) {
+    console.error('Currency error:', error.message);
+    await ctx.reply('❌ Ошибка получения курсов. Попробуй позже.');
+  }
+});
+
+// ==================================================
+// WEB SEARCH (DuckDuckGo - стабильнее чем googlethis)
+// ==================================================
+
+bot.command('search', async (ctx) => {
+  const query = ctx.message.text.replace('/search', '').trim();
+
+  if (!query) {
+    return ctx.reply(
+      '🔍 Поиск в интернете\n\n' +
+      'Пример: /search коты программисты'
+    );
+  }
+
+  await ctx.reply(`🔍 Ищу "${query}"...`);
+
+  try {
+    const response = await axios.get('https://api.duckduckgo.com/', {
+      params: {
+        q: query,
+        format: 'json',
+        no_html: 1,
+        skip_disambig: 1
+      }
+    });
+
+    const data = response.data;
+    let results = [];
+
+    // Основной ответ
+    if (data.AbstractText) {
+      results.push({
+        title: data.Heading || query,
+        description: data.AbstractText,
+        url: data.AbstractURL
+      });
+    }
+
+    // Связанные темы
+    if (data.RelatedTopics && data.RelatedTopics.length) {
+      for (const topic of data.RelatedTopics.slice(0, 4)) {
+        if (topic.Text && topic.FirstURL) {
+          results.push({
+            title: topic.Text.split(' - ')[0],
+            description: topic.Text,
+            url: topic.FirstURL
+          });
+        }
+      }
+    }
+
+    if (!results.length) {
+      return ctx.reply(
+        `🔍 По запросу "${query}" ничего не найдено.\n` +
+        'Попробуй переформулировать запрос.'
+      );
+    }
+
+    const text = results.slice(0, 5).map((r, i) =>
+      `${i + 1}. ${r.title}\n${r.description}\n🔗 ${r.url}`
+    ).join('\n\n');
+
+    await ctx.reply(text);
+  } catch (error) {
+    console.error('Search error:', error.message);
+    await ctx.reply('❌ Ошибка поиска. Попробуй позже.');
+  }
+});
+
+// ==================================================
 // START AND HELP
 // ==================================================
 
@@ -1298,6 +1464,7 @@ bot.command('help', (ctx) => {
     '🎮 ИГРЫ И РАЗВЛЕЧЕНИЯ:\n' +
     '/rps камень 10 - камень, ножницы, бумага на REP\n' +
     '/portrait - психологический портрет\n\n' +
+    '/draw описание - сгенерировать картинку (15 REP)\n\n' +
 
     'В группах бот отвечает, если его упомянуть или ответить на его сообщение.'
   );
@@ -1326,7 +1493,25 @@ const triggers = [
   {
     pattern: word('иди нахуй'),
     replies: ['Сам иди нахуй.', 'Ебало на ноль.', 'ЦЫЦ!']
+  },
+  {
+  pattern: word('дедлайн|дедлаин|deadline'),
+  replies: ['⏰ Дедлайн близко...'],
+  meme: {
+    template: 'fine',
+    top: 'Дедлайн',
+    bottom: 'This is fine'
   }
+},
+{
+  pattern: word('крипта|биткоин|bitcoin|btc'),
+  replies: ['📈 Крипта...'],
+  meme: {
+    template: 'stonks',
+    top: 'Крипта',
+    bottom: 'Stonks'
+  }
+},
 ];
 
 // Не чаще одного раза за это время на один триггер в одном чате
@@ -1379,10 +1564,9 @@ function shouldInterject(ctx) {
 
   // Не отвечаем другим ботам — защита от бесконечных диалогов ботов.
   // Сообщения "от лица чата" (sender_chat) разрешаем — это живые админы.
-  if (ctx.from.is_bot && !ctx.message.sender_chat) {
-    console.log('[SPONT] ❌ Сообщение от бота, пропускаем');
-    return false;
-  }
+  // Пропускаем сообщения от ботов, включая GroupAnonymousBot
+// (даже если у него есть sender_chat — это всё равно не живой пользователь)
+if (ctx.from.is_bot) return false;
 
   // Слишком короткие сообщения не трогаем — не за что зацепиться
   if (ctx.message.text.trim().length < 5) {
@@ -1495,6 +1679,84 @@ function buildChatContext(chatId) {
   return recent.map((m) => `${m.name}: ${m.text}`).join('\n');
 }
 
+
+
+// ==================================================
+// IMAGE GENERATION (Pollinations.ai - бесплатно)
+// ==================================================
+
+bot.command('draw', async (ctx) => {
+  // 1. Получаем запрос (всё, что после /draw)
+  const prompt = ctx.message.text.replace('/draw', '').trim();
+
+  if (!prompt) {
+    return ctx.reply(
+      '🎨 Генерация изображений\n\n' +
+      'Примеры:\n' +
+      '/draw киберпанк кот в неоновых очках\n' +
+      '/draw medieval castle in the fog, highly detailed\n\n' +
+      '💡 Совет: на английском языке результаты часто лучше!'
+    );
+  }
+
+  // 2. Запрещаем рисовать "от лица чата" (у чата нет личного баланса)
+  if (ctx.message.sender_chat || ctx.from.id === 1087968824) {
+    return ctx.reply(
+      '🎨 Чат не может рисовать.\n' +
+      'Нажми на аватарку слева от поля ввода, выбери свой профиль и попробуй снова.'
+    );
+  }
+
+  // 3. Проверяем и списываем репутацию
+  const COST = 15; // Стоимость генерации в REP
+  const user = getUserData(ctx.chat.id, ctx.from);
+
+  if (user.reputation < COST) {
+    return ctx.reply(
+      `❌ Недостаточно REP для генерации картинки.\n` +
+      `Стоимость: ${COST} REP. Твой баланс: ${user.reputation} REP.\n` +
+      `Общайся в чате, чтобы заработать!`
+    );
+  }
+
+  // Списываем репутацию сразу
+  user.reputation -= COST;
+  addTransaction(
+    getGroupData(ctx.chat.id),
+    ctx.from.id,
+    -COST,
+    'Генерация картинки (/draw)'
+  );
+  saveReputationData();
+
+  await ctx.reply('🎨 Рисую... (это займёт 5-15 секунд)');
+
+  // 4. Формируем URL для Pollinations.ai
+  // Добавляем model=flux для гораздо лучшего качества, и случайный seed, чтобы картинки не повторялись
+  const encodedPrompt = encodeURIComponent(prompt);
+  const randomSeed = Math.floor(Math.random() * 999999);
+  const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true&seed=${randomSeed}&model=flux`;
+
+  // 5. Отправляем картинку
+  try {
+    await ctx.replyWithPhoto(imageUrl, {
+      caption: `🖌️ Запрос: "${prompt}"\n_Списано: ${COST} REP. Остаток: ${user.reputation} REP_`,
+      parse_mode: 'Markdown'
+    });
+  } catch (error) {
+    // Если картинка не отправилась (ошибка Telegram или таймаут), возвращаем REP
+    console.error('Draw error:', error.message);
+    user.reputation += COST;
+    saveReputationData();
+    
+    await ctx.reply(
+      '❌ Не удалось сгенерировать или отправить картинку.\n' +
+      'Возможно, запрос содержит запрещённые слова или сервер перегружен.\n' +
+      'Репутация возвращена.'
+    );
+  }
+});
+
 // ==================================================
 // AI MESSAGE HANDLER
 // ==================================================
@@ -1551,9 +1813,35 @@ bot.on('text', async (ctx) => {
     const reply =
       trigger.replies[Math.floor(Math.random() * trigger.replies.length)];
 
-    return ctx.reply(reply, {
-      reply_to_message_id: ctx.message.message_id
-    });
+    // Если у триггера есть мем — отправляем картинку
+    if (trigger.meme) {
+      const encodeMemeText = (str) =>
+        encodeURIComponent(str.replace(/ /g, '_'));
+
+      const memeUrl =
+        `https://api.memegen.link/images/${trigger.meme.template}/` +
+        `${encodeMemeText(trigger.meme.top)}/` +
+        `${encodeMemeText(trigger.meme.bottom)}.png`;
+
+      try {
+        await ctx.replyWithPhoto(memeUrl, {
+          caption: reply,
+          reply_to_message_id: ctx.message.message_id
+        });
+      } catch (e) {
+        // Если мем не отправился — просто текст
+        await ctx.reply(reply, {
+          reply_to_message_id: ctx.message.message_id
+        });
+      }
+    } else {
+      // Обычный текстовый триггер
+      await ctx.reply(reply, {
+        reply_to_message_id: ctx.message.message_id
+      });
+    }
+
+    return;
   }
 
   // В группах отвечаем на упоминание/reply,
@@ -1614,7 +1902,7 @@ bot.on('text', async (ctx) => {
         ...chatHistory.messages
       ],
       temperature: 0.9,
-      max_tokens: 600,
+      max_tokens: 2000,
       reasoning_effort: 'low'
     });
 
@@ -1670,6 +1958,191 @@ bot.on('text', async (ctx) => {
     }
   }
 });
+
+// ==================================================
+// MEME GENERATOR (memegen.link - бесплатно, без ключей)
+// ==================================================
+
+const MEME_TEMPLATES = {
+  'drake': 'drake',           // Drake Hotline Bling (нет / да)
+  'distracted': 'distracted', // Отвлёкся на другую
+  'buttons': 'buttons',       // Две кнопки, потный мужик
+  'change': 'changemymind',   // Change My Mind
+  'doge': 'doge',             // Doge
+  'fine': 'fine',             // This is fine (собака в огне)
+  'disaster': 'disastergirl', // Disaster Girl
+  'success': 'success',       // Success Kid
+  'fry': 'fry',               // Futurama Fry (не уверен)
+  'buzz': 'buzz',             // Buzz Lightyear (везде)
+  'patrick': 'patrick',       // Patrick Star
+  ' spongebob': 'spongebob',  // Spongebob
+  'expanding': 'expanding',   // Expanding Brain
+  'trade': 'trade',           // Trade Offer
+  'panik': 'panik',           // Panik / Kalm / Panik
+  'stonks': 'stonks',         // Stonks
+  'notstonks': 'notstonks',   // Not Stonks
+  'gigachad': 'gigachad',     // Gigachad
+  'sad': 'sad',               // Sad Pepe
+  'feelsgood': 'feelsgood',   // Feels Good Man
+};
+
+// Список шаблонов для справки
+const MEME_LIST_TEXT = Object.keys(MEME_TEMPLATES).join(', ');
+
+bot.command('meme', async (ctx) => {
+  const text = ctx.message.text.replace('/meme', '').trim();
+
+  if (!text) {
+    return ctx.reply(
+      '🎭 Генератор мемов\n\n' +
+      'Формат:\n' +
+      '/meme шаблон | верхний текст | нижний текст\n\n' +
+      'Примеры:\n' +
+      '/meme drake | Писать код руками | Copilot\n' +
+      '/meme fine | Дедлайн завтра | Всё под контролем\n' +
+      '/meme stonks | Купил биткоин | На все деньги\n' +
+      '/meme buttons | Спать | Ещё одна серия\n\n' +
+      '📋 Шаблоны:\n' + MEME_LIST_TEXT
+    );
+  }
+
+  // Парсим: шаблон | верх | низ
+  const parts = text.split('|').map(s => s.trim());
+
+  if (parts.length < 3) {
+    return ctx.reply(
+      '❌ Формат: /meme шаблон | верхний текст | нижний текст\n\n' +
+      'Пример: /meme drake | Писать код | Copilot'
+    );
+  }
+
+  const [templateKey, topText, bottomText] = parts;
+  const template = MEME_TEMPLATES[templateKey.toLowerCase()];
+
+  if (!template) {
+    return ctx.reply(
+      `❌ Шаблон "${templateKey}" не найден.\n\n` +
+      '📋 Доступные:\n' + MEME_LIST_TEXT
+    );
+  }
+
+  // Кодируем текст для URL (пробелы → _, спецсимволы → encodeURIComponent)
+  const encodeMemeText = (str) => {
+    return encodeURIComponent(str.replace(/ /g, '_'));
+  };
+
+  const imageUrl = `https://api.memegen.link/images/${template}/${encodeMemeText(topText)}/${encodeMemeText(bottomText)}.png`;
+
+  try {
+    await ctx.replyWithPhoto(imageUrl, {
+      caption: `🎭 Мем: ${templateKey}\n"${topText}" / "${bottomText}"`
+    });
+  } catch (error) {
+    console.error('Meme error:', error.message);
+    await ctx.reply('❌ Не удалось создать мем. Попробуй другой шаблон или текст.');
+  }
+});
+
+// Команда для просмотра всех шаблонов с картинками
+bot.command('memes', async (ctx) => {
+  await ctx.reply(
+    '🎭 ДОСТУПНЫЕ ШАБЛОНЫ МЕМОВ\n\n' +
+    'Используй: /meme шаблон | верх | низ\n\n' +
+    'drake — Drake (нет / да)\n' +
+    'distracted — Отвлёкся на другую\n' +
+    'buttons — Две кнопки\n' +
+    'change — Change My Mind\n' +
+    'fine — This is fine 🔥🐶\n' +
+    'disaster — Disaster Girl\n' +
+    'success — Success Kid\n' +
+    'fry — Futurama Fry\n' +
+    'buzz — Buzz Lightyear\n' +
+    'expanding — Expanding Brain\n' +
+    'trade — Trade Offer\n' +
+    'panik — Panik / Kalm\n' +
+    'stonks — Stonks 📈\n' +
+    'notstonks — Not Stonks 📉\n' +
+    'gigachad — Gigachad 💪\n' +
+    'sad — Sad Pepe 😢\n' +
+    'doge — Doge 🐕\n' +
+    'patrick — Patrick Star\n' +
+    'spongebob — Spongebob\n' +
+    'feelsgood — Feels Good Man'
+  );
+});
+
+// ==================================================
+// SQLITE MEMORY (рекомендуемый вариант)
+// ==================================================
+
+const Database = require('better-sqlite3');
+const db = new Database('bot_memory.db');
+
+// Создаём таблицы
+db.exec(`
+  CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    username TEXT,
+    first_name TEXT,
+    message_text TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS user_profiles (
+    user_id TEXT PRIMARY KEY,
+    username TEXT,
+    first_name TEXT,
+    total_messages INTEGER DEFAULT 0,
+    last_seen INTEGER,
+    created_at INTEGER
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id);
+  CREATE INDEX IF NOT EXISTS idx_chat_messages_time ON chat_messages(timestamp);
+`);
+
+function saveChatMessage(chatId, userId, username, firstName, text) {
+  const stmt = db.prepare(`
+    INSERT INTO chat_messages (chat_id, user_id, username, first_name, message_text, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+
+  stmt.run(chatId, userId, username, firstName, text, Date.now());
+
+  // Обновляем профиль пользователя
+  const profile = db.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId);
+
+  if (profile) {
+    db.prepare(`
+      UPDATE user_profiles
+      SET total_messages = total_messages + 1, last_seen = ?
+      WHERE user_id = ?
+    `).run(Date.now(), userId);
+  } else {
+    db.prepare(`
+      INSERT INTO user_profiles (user_id, username, first_name, total_messages, last_seen, created_at)
+      VALUES (?, ?, ?, 1, ?, ?)
+    `).run(userId, username, firstName, Date.now(), Date.now());
+  }
+}
+
+function getRecentChatMessages(chatId, limit = 25) {
+  return db.prepare(`
+    SELECT * FROM chat_messages
+    WHERE chat_id = ?
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `).all(chatId, limit).reverse();
+}
+
+// Очистка старых сообщений (старше 30 дней)
+setInterval(() => {
+  const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
+  db.prepare('DELETE FROM chat_messages WHERE timestamp < ?').run(thirtyDaysAgo);
+  console.log(' Очищены старые сообщения из БД');
+}, 24 * 60 * 60 * 1000); // раз в сутки
 
 // ==================================================
 // ERROR HANDLING
