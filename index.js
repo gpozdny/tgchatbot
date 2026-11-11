@@ -364,7 +364,7 @@ ${STYLE_RULES}`
 Говоришь спокойно, наблюдательно и иронично.
 Замечаешь человеческие слабости, бытовые нелепости и трагикомизм повседневной жизни.
 Любишь краткость и точную деталь. Не морализируешь, просто показываешь, как всё нелепо.
-Не выдавай придуманные цитаты за настоящие.
+Не выдавай выдуманные цитаты за настоящие.
 ${STYLE_RULES}`
   },
 
@@ -467,6 +467,9 @@ if (!fs.existsSync(DATA_DIR)) {
 
 let reputationData = {};
 
+// Служебный аккаунт Telegram для сообщений "от лица чата"
+const GROUP_ANONYMOUS_BOT_ID = 1087968824;
+
 function loadReputationData() {
   try {
     if (!fs.existsSync(REPUTATION_FILE)) {
@@ -476,6 +479,19 @@ function loadReputationData() {
 
     const raw = fs.readFileSync(REPUTATION_FILE, 'utf8');
     reputationData = raw.trim() ? JSON.parse(raw) : {};
+
+    // Чистим фантомные профили GroupAnonymousBot из старых данных
+    let cleaned = false;
+
+    for (const chatId of Object.keys(reputationData)) {
+      const users = reputationData[chatId].users;
+      if (users && users[String(GROUP_ANONYMOUS_BOT_ID)]) {
+        delete users[String(GROUP_ANONYMOUS_BOT_ID)];
+        cleaned = true;
+      }
+    }
+
+    if (cleaned) saveReputationData();
   } catch (error) {
     console.error('Ошибка загрузки репутации:', error);
     reputationData = {};
@@ -633,6 +649,41 @@ function awardActivity(chatId, user) {
 }
 
 // ==================================================
+// ADMIN REPUTATION SYNC
+// ==================================================
+
+const ADMIN_REPUTATION = 9999;
+const ADMIN_SYNC_COOLDOWN = 10 * 60 * 1000; // не чаще раза в 10 минут на чат
+const adminSyncTimestamps = new Map();
+
+async function syncAdminReputations(chatId) {
+  const now = Date.now();
+  const last = adminSyncTimestamps.get(chatId) || 0;
+  if (now - last < ADMIN_SYNC_COOLDOWN) return;
+  adminSyncTimestamps.set(chatId, now);
+
+  try {
+    const admins = await bot.telegram.getChatAdministrators(chatId);
+    let changed = false;
+
+    for (const member of admins) {
+      const user = member.user;
+      if (user.is_bot) continue; // ботов и GroupAnonymousBot пропускаем
+
+      const record = getUserData(chatId, user);
+      if (record.reputation !== ADMIN_REPUTATION) {
+        record.reputation = ADMIN_REPUTATION;
+        changed = true;
+      }
+    }
+
+    if (changed) saveReputationData();
+  } catch (error) {
+    console.error('Не удалось синхронизировать админов:', error.message);
+  }
+}
+
+// ==================================================
 // PROFILE
 // ==================================================
 
@@ -654,7 +705,9 @@ function getTargetUser(ctx) {
   return ctx.from;
 }
 
-bot.command('profile', (ctx) => {
+bot.command('profile', async (ctx) => {
+  await syncAdminReputations(ctx.chat.id);
+
   const target = getTargetUser(ctx);
   const record = getUserData(ctx.chat.id, target);
 
@@ -676,10 +729,13 @@ bot.command('profile', (ctx) => {
 // LEADERBOARD
 // ==================================================
 
-bot.command('leaderboard', (ctx) => {
+bot.command('leaderboard', async (ctx) => {
+  await syncAdminReputations(ctx.chat.id);
+
   const group = getGroupData(ctx.chat.id);
 
   const users = Object.values(group.users)
+    .filter((user) => user.id !== GROUP_ANONYMOUS_BOT_ID)
     .sort((a, b) => b.reputation - a.reputation)
     .slice(0, 10);
 
@@ -754,6 +810,11 @@ bot.command('achievements', (ctx) => {
 // ==================================================
 
 bot.command('rps', (ctx) => {
+  // Сообщение "от лица чата" — играем с бесконечным балансом
+  const isChatSender =
+    Boolean(ctx.message.sender_chat) ||
+    ctx.from.id === GROUP_ANONYMOUS_BOT_ID;
+
   const args = ctx.message.text.trim().split(/\s+/);
 
   const aliases = {
@@ -789,59 +850,60 @@ bot.command('rps', (ctx) => {
     );
   }
 
-  const user = getUserData(ctx.chat.id, ctx.from);
+  // Обычный игрок: проверяем баланс. У чата баланс бесконечный.
+  let user = null;
+  if (!isChatSender) {
+    user = getUserData(ctx.chat.id, ctx.from);
 
-  if (user.reputation < amount) {
-    return ctx.reply(
-      `❌ Недостаточно REP.\n` +
-      `Твой баланс: ${user.reputation} REP.`
-    );
+    if (user.reputation < amount) {
+      return ctx.reply(
+        `❌ Недостаточно REP.\n` +
+        `Твой баланс: ${user.reputation} REP.`
+      );
+    }
   }
 
   const choices = ['rock', 'scissors', 'paper'];
-
-  const botChoice = choices[
-    Math.floor(Math.random() * choices.length)
-  ];
+  const botChoice = choices[Math.floor(Math.random() * choices.length)];
 
   let result;
-
   if (choice === botChoice) {
     result = 'draw';
-    user.gameStats.draws += 1;
   } else if (
     (choice === 'rock' && botChoice === 'scissors') ||
     (choice === 'scissors' && botChoice === 'paper') ||
     (choice === 'paper' && botChoice === 'rock')
   ) {
     result = 'win';
-    user.reputation += amount;
-    user.gameStats.wins += 1;
   } else {
     result = 'loss';
-    user.reputation -= amount;
-    user.gameStats.losses += 1;
   }
 
-  if (result === 'win') {
-    addTransaction(
-      getGroupData(ctx.chat.id),
-      ctx.from.id,
-      amount,
-      'Победа в камень-ножницы-бумага'
-    );
+  // Меняем баланс и статистику только у реальных игроков
+  if (!isChatSender) {
+    if (result === 'draw') {
+      user.gameStats.draws += 1;
+    } else if (result === 'win') {
+      user.reputation += amount;
+      user.gameStats.wins += 1;
+      addTransaction(
+        getGroupData(ctx.chat.id),
+        ctx.from.id,
+        amount,
+        'Победа в камень-ножницы-бумага'
+      );
+    } else {
+      user.reputation -= amount;
+      user.gameStats.losses += 1;
+      addTransaction(
+        getGroupData(ctx.chat.id),
+        ctx.from.id,
+        -amount,
+        'Поражение в камень-ножницы-бумага'
+      );
+    }
+    saveReputationData();
   }
-
-  if (result === 'loss') {
-    addTransaction(
-      getGroupData(ctx.chat.id),
-      ctx.from.id,
-      -amount,
-      'Поражение в камень-ножницы-бумага'
-    );
-  }
-
-  saveReputationData();
 
   const resultText = {
     win: `🏆 Ты победил!\n🎁 Получено: +${amount} REP`,
@@ -849,12 +911,16 @@ bot.command('rps', (ctx) => {
     draw: '🤝 Ничья! Ставка возвращена.'
   };
 
+  const balanceText = isChatSender
+    ? '∞ (бесконечный баланс чата)'
+    : `${user.reputation} REP`;
+
   ctx.reply(
     `🎮 КАМЕНЬ, НОЖНИЦЫ, БУМАГА\n\n` +
     `👤 Твой выбор: ${emojis[choice]}\n` +
     `🤖 Мой выбор: ${emojis[botChoice]}\n\n` +
     `${resultText[result]}\n\n` +
-    `⭐ Текущий баланс: ${user.reputation} REP`
+    `⭐ Текущий баланс: ${balanceText}`
   );
 });
 
@@ -948,9 +1014,9 @@ bot.command('portrait', async (ctx) => {
 
     portrait = portrait.replace(/\*\*/g, '');
 
-if (portrait.length > 3500) {
-  portrait = portrait.slice(0, 3499).trimEnd() + '…';
-}
+    if (portrait.length > 3500) {
+      portrait = portrait.slice(0, 3499).trimEnd() + '…';
+    }
 
     portraitCooldowns.set(key, Date.now());
 
@@ -993,12 +1059,13 @@ bot.command('rep_help', (ctx) => {
     '• Максимум 10 REP в сутки\n\n' +
 
     'Административные команды:\n' +
+    '/rep_add @username 10 причина\n' +
     '/rep_add ID 10 причина\n' +
-    '/rep_remove ID 5 причина\n' +
-    '/rep_set ID 100 причина\n\n' +
+    '/rep_remove @username 5 причина\n' +
+    '/rep_set @username 100 причина\n\n' +
 
-    'Также можно ответить на сообщение пользователя:\n' +
-    '/rep_add 10 причина'
+    'Можно по имени: /rep_add Геннадий 5 причина\n' +
+    'Или ответом на сообщение: /rep_add 10 причина'
   );
 });
 
@@ -1058,6 +1125,32 @@ async function isAdmin(ctx) {
 // ADMIN REPUTATION COMMANDS
 // ==================================================
 
+// Поиск пользователя в базе чата по @username или имени.
+// Бот знает только тех, кто хотя бы раз писал в этот чат.
+function findUserByQuery(chatId, query) {
+  const group = getGroupData(chatId);
+  const q = query.replace(/^@/, '').toLowerCase();
+
+  const users = Object.values(group.users)
+    .filter((u) => u.id !== GROUP_ANONYMOUS_BOT_ID);
+
+  // Сначала точное совпадение по @username
+  const byUsername = users.find(
+    (u) => u.username && u.username.toLowerCase() === q
+  );
+  if (byUsername) return { user: byUsername };
+
+  // Потом по имени (firstName)
+  const byName = users.filter(
+    (u) => u.firstName && u.firstName.toLowerCase() === q
+  );
+
+  if (byName.length === 1) return { user: byName[0] };
+  if (byName.length > 1) return { ambiguous: true };
+
+  return null;
+}
+
 async function modifyReputation(ctx, mode) {
   if (!(await isAdmin(ctx))) {
     return ctx.reply('⛔ Эта команда доступна только администраторам.');
@@ -1070,11 +1163,38 @@ async function modifyReputation(ctx, mode) {
   let reason;
 
   if (ctx.message.reply_to_message?.from) {
+    // Ответом на сообщение — как раньше
     targetId = ctx.message.reply_to_message.from.id;
     amount = Number(args[1]);
     reason = args.slice(2).join(' ') || 'Без указания причины';
   } else {
-    targetId = Number(args[1]);
+    const targetArg = args[1] || '';
+
+    if (/^\d+$/.test(targetArg)) {
+      // По числовому ID
+      targetId = Number(targetArg);
+    } else {
+      // По @username или имени
+      const found = findUserByQuery(ctx.chat.id, targetArg);
+
+      if (found && found.ambiguous) {
+        return ctx.reply(
+          `Несколько пользователей с именем "${targetArg}".\n` +
+          'Уточни через @username или ID.'
+        );
+      }
+
+      if (!found) {
+        return ctx.reply(
+          `Пользователь "${targetArg}" не найден в базе чата.\n` +
+          'Он должен хотя бы раз написать в чат.\n' +
+          'Либо ответь на его сообщение, либо укажи ID.'
+        );
+      }
+
+      targetId = found.user.id;
+    }
+
     amount = Number(args[2]);
     reason = args.slice(3).join(' ') || 'Без указания причины';
   }
@@ -1087,15 +1207,19 @@ async function modifyReputation(ctx, mode) {
   ) {
     return ctx.reply(
       'Неверный формат команды:\n' +
+      '/rep_add @username 10 причина\n' +
       '/rep_add ID 10 причина\n' +
-      '/rep_remove ID 5 причина\n' +
-      '/rep_set ID 100 причина'
+      '/rep_remove @username 5 причина\n' +
+      '/rep_set @username 100 причина\n\n' +
+      'Или ответом на сообщение: /rep_add 10 причина'
     );
   }
 
   const group = getGroupData(ctx.chat.id);
 
-  const user = getUserData(ctx.chat.id, {
+  // Если профиль уже есть — не затираем имя заглушкой 'User ID'
+  const existing = group.users[String(targetId)];
+  const user = getUserData(ctx.chat.id, existing || {
     id: targetId,
     first_name: 'User ' + targetId
   });
@@ -1123,6 +1247,7 @@ async function modifyReputation(ctx, mode) {
 
   ctx.reply(
     `✅ Репутация обновлена.\n` +
+    `Пользователь: ${getDisplayName(user)}\n` +
     `ID: ${targetId}\n` +
     `REP: ${user.reputation}\n` +
     `Причина: ${reason}`
@@ -1193,17 +1318,14 @@ function word(pattern) {
 }
 
 const triggers = [
-  {
-    pattern: word('где меф'),
-    replies: ['В твоей жопе.', 'Ты всё уже сдолбил.', 'В пизде.']
-  },
+
   {
     pattern: word('пош[её]л нахуй'),
     replies: ['Сам иди нахуй.', 'Ебало на ноль.', 'ЦЫЦ!']
   },
   {
-    pattern: word('не лес не парк'),
-    replies: ['ЕВУ УБИЛИ!', 'ЗАСТРЕЛИЛИ ЕВУ!', 'ЕВА МЕРТВА']
+    pattern: word('иди нахуй'),
+    replies: ['Сам иди нахуй.', 'Ебало на ноль.', 'ЦЫЦ!']
   }
 ];
 
@@ -1227,6 +1349,150 @@ function findTrigger(chatId, text) {
   }
 
   return null;
+}
+
+// ==================================================
+// SPONTANEOUS REPLIES (бот иногда сам вклинивается в разговор)
+// ==================================================
+
+const SPONTANEOUS_MIN_DELAY = 30 * 60 * 1000;      // 30 минут
+const SPONTANEOUS_MAX_DELAY = 3 * 60 * 60 * 1000;  // 3 часа
+const SPONTANEOUS_CHANCE = 0.4;                    // 30%            // шанс ответить, когда пауза прошла
+
+const nextSpontaneousAt = new Map();
+
+function randomSpontaneousDelay() {
+  return SPONTANEOUS_MIN_DELAY +
+    Math.random() * (SPONTANEOUS_MAX_DELAY - SPONTANEOUS_MIN_DELAY);
+}
+
+function shouldInterject(ctx) {
+  console.log('[SPONT] === Проверка возможности вклинивания ===');
+  console.log('[SPONT] Отправитель:', {
+    isBot: ctx.from.is_bot,
+    username: ctx.from.username,
+    firstName: ctx.from.first_name,
+    hasSenderChat: Boolean(ctx.message.sender_chat)
+  });
+  console.log('[SPONT] Длина сообщения:', ctx.message.text.trim().length);
+  console.log('[SPONT] Chat ID:', ctx.chat.id);
+
+  // Не отвечаем другим ботам — защита от бесконечных диалогов ботов.
+  // Сообщения "от лица чата" (sender_chat) разрешаем — это живые админы.
+  if (ctx.from.is_bot && !ctx.message.sender_chat) {
+    console.log('[SPONT] ❌ Сообщение от бота, пропускаем');
+    return false;
+  }
+
+  // Слишком короткие сообщения не трогаем — не за что зацепиться
+  if (ctx.message.text.trim().length < 5) {
+    console.log('[SPONT] ❌ Сообщение слишком короткое (< 5 символов)');
+    return false;
+  }
+
+  const chatId = ctx.chat.id;
+  const now = Date.now();
+
+  // Впервые видим чат — ставим случайную паузу и пока молчим
+  if (!nextSpontaneousAt.has(chatId)) {
+    const delay = randomSpontaneousDelay();
+    nextSpontaneousAt.set(chatId, now + delay);
+    console.log(`[SPONT] ⏳ Первая пауза для чата: ${(delay / 1000).toFixed(0)} сек`);
+    console.log(`[SPONT] Следующая проверка после: ${new Date(now + delay).toLocaleTimeString()}`);
+    return false;
+  }
+
+  const nextTime = nextSpontaneousAt.get(chatId);
+  const waitMs = nextTime - now;
+
+  // Пауза ещё не прошла
+  if (now < nextTime) {
+    console.log(`[SPONT] ⏳ Пауза ещё не прошла, ждём ${(waitMs / 1000).toFixed(0)} сек`);
+    console.log(`[SPONT] Следующая проверка после: ${new Date(nextTime).toLocaleTimeString()}`);
+    return false;
+  }
+
+  console.log(`[SPONT] ✅ Пауза прошла! Бросаем монетку...`);
+
+  // Пауза прошла — бросаем монетку. Не выпала — ждём следующего сообщения.
+  const roll = Math.random();
+  console.log(`[SPONT] 🎲 Выпало: ${roll.toFixed(3)}, шанс: ${SPONTANEOUS_CHANCE}`);
+
+  if (roll > SPONTANEOUS_CHANCE) {
+    console.log('[SPONT] ❌ Шанс не выпал, отодвигаем следующую проверку');
+    const newDelay = randomSpontaneousDelay();
+    nextSpontaneousAt.set(chatId, now + newDelay);
+    console.log(`[SPONT] Новая пауза: ${(newDelay / 1000).toFixed(0)} сек`);
+    return false;
+  }
+
+  // Отвечаем и планируем следующее вклинивание через случайный срок
+  console.log('[SPONT] ✅✅✅ ВКЛИНИВАЕМСЯ! Отвечаем на сообщение!');
+  const newDelay = randomSpontaneousDelay();
+  nextSpontaneousAt.set(chatId, now + newDelay);
+  console.log(`[SPONT] Следующая проверка через: ${(newDelay / 1000).toFixed(0)} сек`);
+  return true;
+}
+
+bot.command('test_spont', async (ctx) => {
+  if (ctx.chat.type === 'private') {
+    return ctx.reply('Эта команда работает только в группах');
+  }
+
+  // Имитируем, что пауза прошла и шанс выпал
+  nextSpontaneousAt.set(ctx.chat.id, Date.now() - 1000);
+
+  // Отправляем фиктивное сообщение для триггера
+  await ctx.reply('🎲 Тестирую спонтанные ответы... Напиши что-нибудь в чате, и я отвечу.');
+});
+
+bot.command('show_context', (ctx) => {
+  const feed = chatFeed.get(ctx.chat.id) || [];
+  if (!feed.length) {
+    return ctx.reply('Лента пуста — пока никто не писал.');
+  }
+
+  const text = '📋 ПОСЛЕДНИЕ СООБЩЕНИЯ:\n\n' +
+    feed.slice(-10).map((m, i) => `${i+1}. ${m.name}: ${m.text}`).join('\n');
+
+  ctx.reply(text);
+});
+
+// ==================================================
+// CHAT CONTEXT (лента разговора для понимания сути беседы)
+// ==================================================
+
+const CHAT_FEED_LIMIT = 40;        // сколько сообщений храним в памяти на чат
+const CHAT_CONTEXT_MESSAGES = 25;  // сколько последних отдаём модели
+const chatFeed = new Map();
+
+// Имя отправителя для ленты
+function senderName(ctx) {
+  if (ctx.message.sender_chat) {
+    return ctx.message.sender_chat.title || 'Чат';
+  }
+  return ctx.from.first_name || ctx.from.username || 'Кто-то';
+}
+
+// Записываем сообщение в ленту чата
+function recordChatMessage(chatId, name, text) {
+  if (!chatFeed.has(chatId)) {
+    chatFeed.set(chatId, []);
+  }
+
+  const feed = chatFeed.get(chatId);
+  feed.push({ name, text: text.slice(0, 300) });
+
+  if (feed.length > CHAT_FEED_LIMIT) {
+    feed.shift();
+  }
+}
+
+// Собираем недавний разговор в текст для промпта
+function buildChatContext(chatId) {
+  const feed = chatFeed.get(chatId) || [];
+  const recent = feed.slice(-CHAT_CONTEXT_MESSAGES);
+  return recent.map((m) => `${m.name}: ${m.text}`).join('\n');
 }
 
 // ==================================================
@@ -1258,9 +1524,15 @@ bot.on('text', async (ctx) => {
 
   const isPrivate = ctx.chat.type === 'private';
 
+  // Записываем каждое сообщение группы в общую ленту разговора
+  if (!isPrivate && (!ctx.from.is_bot || ctx.message.sender_chat)) {
+    recordChatMessage(ctx.chat.id, senderName(ctx), message);
+  }
+
   // Начисляем репутацию за сообщения в группах
   if (!isPrivate) {
     awardActivity(ctx.chat.id, ctx.from);
+    syncAdminReputations(ctx.chat.id);
   }
 
   const mentioned = message
@@ -1284,8 +1556,13 @@ bot.on('text', async (ctx) => {
     });
   }
 
-  // В группах отвечаем только на упоминание или reply
-  if (!addressed) return;
+  // В группах отвечаем на упоминание/reply,
+  // а иногда сами вклиниваемся в чужой разговор
+  let spontaneous = false;
+  if (!addressed) {
+    if (!shouldInterject(ctx)) return;
+    spontaneous = true;
+  }
 
   let chatHistory = histories.get(ctx.chat.id);
 
@@ -1310,6 +1587,20 @@ bot.on('text', async (ctx) => {
       chatHistory.messages.slice(-MEMORY_SIZE * 2);
   }
 
+  // Для спонтанной реплики даём модели контекст всего разговора
+  let contextNote = '';
+  if (spontaneous) {
+    const conversation = buildChatContext(ctx.chat.id);
+
+    contextNote =
+      '\n\nНЕДАВНИЙ РАЗГОВОР В ЧАТЕ (от старых к новым):\n' +
+      conversation +
+      '\n\nПойми, о чём сейчас говорят, и вставь уместную короткую реплику в стиле персонажа. ' +
+      'Реплика должна быть по теме разговора, а не случайной. ' +
+      'Ты вклиниваешься сам, тебя не спрашивали — не отвечай как на вопрос и не задавай уточняющих вопросов. ' +
+      'Одна-две фразы, максимум.';
+  }
+
   try {
     const completion = await openai.chat.completions.create({
       model: MODEL,
@@ -1318,7 +1609,7 @@ bot.on('text', async (ctx) => {
           role: 'system',
           content:
             `${BASE_SYSTEM_PROMPT}\n\n` +
-            `ТЕКУЩИЙ ПЕРСОНАЖ:\n${character.prompt}`
+            `ТЕКУЩИЙ ПЕРСОНАЖ:\n${character.prompt}${contextNote}`
         },
         ...chatHistory.messages
       ],
@@ -1337,6 +1628,10 @@ bot.on('text', async (ctx) => {
 
     if (!answer) {
       console.error('Groq вернул пустой ответ:', completion.choices[0]);
+      if (spontaneous) {
+        chatHistory.messages.pop(); // убираем сообщение без ответа
+        return; // не спамим в чат без повода
+      }
       answer = 'Модель вернула пустой ответ. Попробуй ещё раз.';
     }
 
@@ -1351,14 +1646,28 @@ bot.on('text', async (ctx) => {
 
     histories.set(ctx.chat.id, chatHistory);
 
-    await ctx.reply(answer);
+    // Записываем ответ бота в ленту, чтобы разговор оставался связным
+    if (!isPrivate) {
+      recordChatMessage(ctx.chat.id, character.name, answer);
+    }
+
+    if (spontaneous) {
+      await ctx.reply(answer, {
+        reply_to_message_id: ctx.message.message_id
+      });
+    } else {
+      await ctx.reply(answer);
+    }
 
   } catch (error) {
     console.error('Groq error:', error.message);
 
-    await ctx.reply(
-      '❌ Ошибка при обращении к Groq API.'
-    );
+    // При спонтанном вклинивании ошибку в чат не шлём — только в консоль
+    if (!spontaneous) {
+      await ctx.reply(
+        '❌ Ошибка при обращении к Groq API.'
+      );
+    }
   }
 });
 
@@ -1394,6 +1703,13 @@ async function main() {
   bot.telegram.getMe()
     .then((info) => console.log(`✅ Бот @${info.username} запущен`))
     .catch(() => {});
+
+  // Выставляем админам 9999 во всех известных группах
+  for (const key of Object.keys(reputationData)) {
+    if (key.startsWith('-')) { // ID групп отрицательные, лички пропускаем
+      syncAdminReputations(Number(key));
+    }
+  }
 
   await bot.launch();
 }
