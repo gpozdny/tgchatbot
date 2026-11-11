@@ -1,6 +1,6 @@
 # TalkieTalkieJunkieDude
 
-A Telegram chat bot with switchable personalities, powered by the Groq API (`openai/gpt-oss-120b`). It replies in character, keeps short conversation memory per chat, reacts to trigger words, and has a small reputation system with mini-games.
+A Telegram chat bot with switchable personalities, powered by the Groq API (`qwen/qwen3.8-27b`). It replies in character, keeps short conversation memory per chat, reacts to trigger words, and has a small reputation system with mini-games.
 
 The bot's language is Russian.
 

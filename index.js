@@ -1015,6 +1015,32 @@ async function isAdmin(ctx) {
     return adminIds.includes(String(ctx.from.id));
   }
 
+  // Сообщение отправлено "от лица чата" или от лица канала:
+  // ctx.from здесь — служебный GroupAnonymousBot (1087968824),
+  // реальный отправитель скрыт в sender_chat.
+  const senderChat = ctx.message?.sender_chat;
+
+  if (senderChat) {
+    // От лица самой группы — так могут только админы (право "Анонимность")
+    if (senderChat.id === ctx.chat.id) {
+      return true;
+    }
+
+    // От лица привязанного к группе канала — тоже считаем админом.
+    // Если такое не нужно, просто удали этот блок.
+    try {
+      const chat = await ctx.telegram.getChat(ctx.chat.id);
+      if (chat.linked_chat_id === senderChat.id) {
+        return true;
+      }
+    } catch (error) {
+      console.error('Не удалось получить информацию о чате:', error);
+    }
+
+    // От лица какого-то постороннего канала — не админ
+    return false;
+  }
+
   try {
     const member = await ctx.telegram.getChatMember(
       ctx.chat.id,
