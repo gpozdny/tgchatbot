@@ -938,7 +938,7 @@ bot.command('portrait', async (ctx) => {
         }
       ],
       temperature: 0.8,
-      max_tokens: 800,
+      max_tokens: 1500,
       reasoning_effort: 'low'
     });
 
@@ -946,9 +946,11 @@ bot.command('portrait', async (ctx) => {
       completion.choices[0]?.message?.content?.trim() ||
       'Не удалось составить портрет.';
 
-    if (portrait.length > 1200) {
-      portrait = portrait.slice(0, 1199).trimEnd() + '…';
-    }
+    portrait = portrait.replace(/\*\*/g, '');
+
+if (portrait.length > 3500) {
+  portrait = portrait.slice(0, 3499).trimEnd() + '…';
+}
 
     portraitCooldowns.set(key, Date.now());
 
