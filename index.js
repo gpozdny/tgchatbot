@@ -1467,6 +1467,22 @@ async function searchWikipedia(query) {
   return [];
 }
 
+// Простой ли запрос. Сложным считаем длинную фразу, вопрос или запрос
+// про свежие данные (цены, курсы, новости, "сегодня", год), где Википедия бесполезна.
+const COMPLEX_QUERY_PATTERN = new RegExp(
+  '[?]|\\d|' +
+  '(?<![\\p{L}])(?:как|почему|зачем|где|когда|сколько|какой|какая|какие|кто|что такое|' +
+  'сегодня|сейчас|вчера|завтра|новости|последн\\p{L}*|курс|цена|цены|купить|' +
+  'лучший|лучшая|лучшие|отзывы|обзор|прогноз|погода|' +
+  'how|why|where|when|what|who|best|price|news|latest|today|review)(?![\\p{L}])',
+  'iu'
+);
+
+function isComplexQuery(query) {
+  const words = query.trim().split(/\s+/).filter(Boolean);
+  return words.length >= 4 || COMPLEX_QUERY_PATTERN.test(query);
+}
+
 bot.command('search', async (ctx) => {
   const query = getCommandArgs(ctx);
 
@@ -1482,16 +1498,25 @@ bot.command('search', async (ctx) => {
   try {
     let results = [];
 
-    if (TAVILY_API_KEY) {
-      try {
-        results = await searchTavily(query);
-      } catch (error) {
-        console.error('Tavily error:', describeHttpError(error));
-      }
-    }
+    // Простой запрос (одно-два слова, что-то вроде названия) -> сначала Википедия.
+    // Сложный (вопрос, свежие данные, длинная фраза) -> сначала Tavily.
+    // Если первый источник ничего не дал, пробуем второй.
+    const useTavily = Boolean(TAVILY_API_KEY);
+    const order = useTavily && isComplexQuery(query)
+      ? ['tavily', 'wikipedia']
+      : ['wikipedia', 'tavily'];
 
-    if (!results.length) {
-      results = await searchWikipedia(query);
+    for (const source of order) {
+      if (results.length) break;
+      if (source === 'tavily' && !useTavily) continue;
+
+      try {
+        results = source === 'tavily'
+          ? await searchTavily(query)
+          : await searchWikipedia(query);
+      } catch (error) {
+        console.error(`Search source ${source} failed:`, describeHttpError(error));
+      }
     }
 
     if (!results.length) {
@@ -1919,33 +1944,38 @@ bot.command('draw', async (ctx) => {
     return ctx.reply('⚠️ Генерация картинок не настроена. Обратись к админу.');
   }
 
-  // 3. Запрещаем рисовать "от лица чата" (у чата нет личного баланса)
-  if (ctx.message.sender_chat || ctx.from.id === GROUP_ANONYMOUS_BOT_ID) {
-    return ctx.reply(
-      '🎨 Чат не может рисовать.\n' +
-      'Нажми на аватарку слева от поля ввода, выбери свой профиль и попробуй снова.'
-    );
+  // 3. Сообщение "от лица чата" (анонимный админ или привязанный канал):
+  // рисуем бесплатно, но только если отправитель действительно админ
+  const isChatSender =
+    Boolean(ctx.message.sender_chat) || ctx.from.id === GROUP_ANONYMOUS_BOT_ID;
+
+  if (isChatSender && !(await isAdmin(ctx))) {
+    return ctx.reply('🎨 Рисовать от имени чата или канала могут только админы.');
   }
 
-  // 4. Проверяем и списываем репутацию
-  const user = getUserData(ctx.chat.id, ctx.from);
+  // 4. Обычный пользователь: проверяем и списываем репутацию
+  let user = null;
 
-  if (user.reputation < DRAW_COST) {
-    return ctx.reply(
-      `❌ Недостаточно REP для генерации картинки.\n` +
-      `Стоимость: ${DRAW_COST} REP. Твой баланс: ${user.reputation} REP.\n` +
-      `Общайся в чате, чтобы заработать!`
+  if (!isChatSender) {
+    user = getUserData(ctx.chat.id, ctx.from);
+
+    if (user.reputation < DRAW_COST) {
+      return ctx.reply(
+        `❌ Недостаточно REP для генерации картинки.\n` +
+        `Стоимость: ${DRAW_COST} REP. Твой баланс: ${user.reputation} REP.\n` +
+        `Общайся в чате, чтобы заработать!`
+      );
+    }
+
+    user.reputation -= DRAW_COST;
+    addTransaction(
+      getGroupData(ctx.chat.id),
+      ctx.from.id,
+      -DRAW_COST,
+      'Генерация картинки (/draw)'
     );
+    saveReputationData();
   }
-
-  user.reputation -= DRAW_COST;
-  addTransaction(
-    getGroupData(ctx.chat.id),
-    ctx.from.id,
-    -DRAW_COST,
-    'Генерация картинки (/draw)'
-  );
-  saveReputationData();
 
   await ctx.reply('🎨 Рисую... (это займёт 5-15 секунд)');
 
@@ -1961,21 +1991,25 @@ bot.command('draw', async (ctx) => {
       {
         caption:
           `🖌️ ${prompt.slice(0, 200)}\n` +
-          `Списано: ${DRAW_COST} REP. Остаток: ${user.reputation} REP`
+          (user
+            ? `Списано: ${DRAW_COST} REP. Остаток: ${user.reputation} REP`
+            : 'Бесплатно для чата')
       }
     );
   } catch (error) {
     console.error('Draw error:', describeHttpError(error));
 
-    // Возвращаем REP
-    user.reputation += DRAW_COST;
-    addTransaction(
-      getGroupData(ctx.chat.id),
-      ctx.from.id,
-      DRAW_COST,
-      'Возврат: не удалось сгенерировать картинку'
-    );
-    saveReputationData();
+    // Возвращаем REP (у чата REP не списывались)
+    if (user) {
+      user.reputation += DRAW_COST;
+      addTransaction(
+        getGroupData(ctx.chat.id),
+        ctx.from.id,
+        DRAW_COST,
+        'Возврат: не удалось сгенерировать картинку'
+      );
+      saveReputationData();
+    }
 
     let reason = 'Сервер генерации не ответил или перегружен.';
 
@@ -1989,7 +2023,9 @@ bot.command('draw', async (ctx) => {
         'Попробуй переформулировать.';
     }
 
-    await ctx.reply(`❌ Не удалось нарисовать. ${reason}\nREP возвращены.`);
+    await ctx.reply(
+      `❌ Не удалось нарисовать. ${reason}` + (user ? '\nREP возвращены.' : '')
+    );
   }
 });
 
