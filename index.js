@@ -1384,26 +1384,62 @@ bot.command('weather', async (ctx) => {
 // CURRENCY RATES (Курсы валют)
 // ==================================================
 
+// Цена BTC в долларах. CoinGecko без ключа, запасной вариант: Binance.
+async function getBtcUsd() {
+  try {
+    const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
+      params: { ids: 'bitcoin', vs_currencies: 'usd' },
+      timeout: 10000
+    });
+
+    const price = Number(response.data?.bitcoin?.usd);
+    if (price > 0) return price;
+  } catch (error) {
+    console.error('CoinGecko error:', describeHttpError(error));
+  }
+
+  try {
+    const response = await axios.get('https://api.binance.com/api/v3/ticker/price', {
+      params: { symbol: 'BTCUSDT' },
+      timeout: 10000
+    });
+
+    const price = Number(response.data?.price);
+    if (price > 0) return price;
+  } catch (error) {
+    console.error('Binance error:', describeHttpError(error));
+  }
+
+  return null;
+}
+
 bot.command('rate', async (ctx) => {
   try {
-    const response = await axios.get('https://open.er-api.com/v6/latest/RUB');
+    const response = await axios.get('https://open.er-api.com/v6/latest/RUB', {
+      timeout: 15000
+    });
     const data = response.data;
 
     if (data.result !== 'success') {
       throw new Error('API вернул ошибку: ' + data.result);
     }
 
-    const text =
-      '💱 Курсы валют (1 RUB =)\n\n' +
-      `🇺🇸 USD: ${data.rates.USD.toFixed(4)}\n` +
-      `🇪🇺 EUR: ${data.rates.EUR.toFixed(4)}\n` +
-      `🇨🇳 CNY: ${data.rates.CNY.toFixed(4)}\n` +
-      `🇰🇿 KZT: ${data.rates.KZT.toFixed(2)}\n\n` +
-      `Данные на ${new Date().toLocaleString('ru-RU')}`;
+    // API отдаёт "сколько единиц валюты за 1 RUB", поэтому переворачиваем
+    const toRub = (code) => (1 / data.rates[code]).toFixed(2);
 
-    await ctx.reply(text);
+    const btc = await getBtcUsd();
+    const btcText = btc
+      ? Math.round(btc).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
+      : 'н/д';
+
+    await ctx.reply(
+      `USD = ${toRub('USD')} RUB\n` +
+      `EUR = ${toRub('EUR')} RUB\n` +
+      `CNY = ${toRub('CNY')} RUB\n` +
+      `BTC = ${btcText} USD`
+    );
   } catch (error) {
-    console.error('Currency error:', error.message);
+    console.error('Currency error:', describeHttpError(error));
     await ctx.reply('❌ Ошибка получения курсов. Попробуй позже.');
   }
 });
