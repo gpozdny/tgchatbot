@@ -1,23 +1,26 @@
 # TalkieTalkieJunkieDude
 
-A Telegram chat bot with switchable personalities, powered by the Groq API (`qwen/qwen3.8-27b`). It replies in character, keeps short conversation memory per chat, reacts to trigger words, joins conversations on its own from time to time, generates images and memes, and has a small reputation system with mini-games.
+A Telegram chat bot with switchable personalities, powered by the Groq API (`qwen/qwen3.8-27b`). It replies in character, remembers the conversation, reacts to trigger words, joins conversations on its own from time to time, generates images and memes, summarizes the chat, and has a reputation system with daily rewards, transfers and mini-games.
 
 The bot's language is Russian.
 
 ## Features
 
 - **17 personalities.** Switch with a command, for example `/gopnik`, `/toxic`, `/nietzsche`. Full list with descriptions: `/characters`.
-- **Conversation memory.** Remembers the last 8 exchanges per chat. Switching personality clears it.
+- **Conversation memory.** Remembers the last 8 exchanges per chat and keeps them across restarts. In groups every message is stored with its author's name, so the bot knows who said what. Switching personality clears the memory.
 - **Group behavior.** In groups the bot answers when mentioned (`@botname`) or when someone replies to its message. In private chats it answers everything.
-- **Spontaneous replies.** In groups the bot sometimes jumps into the conversation by itself with a short in-character remark. After each reply it stays silent for a random 30 minutes to 3 hours, then has a 40% chance to react to the next message.
-- **Trigger words.** Instant canned replies to specific phrases, with a per-chat cooldown.
-- **Reputation system.** +1 REP for chat activity (once per 5 minutes, max 10 per day), profiles, titles, leaderboard and achievements. Chat admins automatically get 9999 REP.
-- **Rock, paper, scissors.** Bet REP against the bot.
+- **Spontaneous replies.** In groups the bot sometimes jumps into the conversation by itself with a short in-character remark, based on the recent chat. After each reply it stays silent for a random 30 minutes to 3 hours, then has a 40% chance (configurable per chat) to react to the next message. Chat admins can turn it off or change the chance with `/spont`.
+- **Trigger words.** Canned replies to specific phrases, with several reply variants, an optional trigger chance and a per-chat cooldown.
+- **Reputation system.** REP for chat activity, a daily reward with a streak, transfers between members, profiles, titles, leaderboard and achievements. Chat admins automatically get 9999 REP.
+- **Chat summary.** `/tldr` retells the latest messages of the chat.
+- **Mini-games and toys.** Rock, paper, scissors with REP bets, dice, 8-ball and a "choose for me" command.
 - **Psychological portrait.** `/portrait` generates a humorous profile of a user from their recent messages.
 - **Image generation.** `/draw` creates a picture from a text description (FLUX.1 schnell on Cloudflare Workers AI). Costs REP. Russian prompts are translated to English automatically for better results.
 - **Meme generator.** `/meme` captions imgflip templates, including templates with three or four text fields.
 - **Utilities.** Weather, currency rates and web search.
-- **Admin tools.** Add, remove or set a user's REP.
+- **Anti-spam.** Per-user cooldowns on AI replies, `/meme`, `/draw` and personality switches, plus a daily `/draw` limit.
+- **Persistence.** Reputation, conversation history, chat feed, portrait messages and per-chat settings survive restarts.
+- **Admin tools.** Add, remove or set a user's REP, configure spontaneous replies, debug commands.
 - **Command menu.** Commands are registered with Telegram, so they show up when you type `/`.
 
 ## Requirements
@@ -103,7 +106,7 @@ or
 node index.js
 ```
 
-Stop it with `Ctrl+C`.
+Stop it with `Ctrl+C`. On shutdown the bot writes pending data to disk, so nothing is lost.
 
 ## Telegram setup
 
@@ -131,6 +134,8 @@ To change the bot's avatar, use `/setuserpic` in @BotFather.
 
 The default personality is `gopnik`. Some characters are satirical role-play and do not represent real statements.
 
+Switching a personality wipes the chat's memory, so in groups non-admins can do it once per 2 minutes. Admins and private chats have no limit.
+
 ### Reputation and games
 
 | Command | Description |
@@ -139,15 +144,30 @@ The default personality is `gopnik`. Some characters are satirical role-play and
 | `/leaderboard` | Top 10 users of the chat |
 | `/achievements` | Your achievements |
 | `/rep_help` | Details about the reputation system |
+| `/daily` | Daily reward. +5 REP on the first day, +1 for every following day in a row, up to +15. Missing a day resets the streak. The day changes at 00:00 UTC. Groups only. |
+| `/give @username 10` | Transfer REP to another member. Also `/give Name 10`, `/give ID 10`, or reply to a message with `/give 10`. Up to 100 REP per day (admins are exempt), 5 second cooldown. Bots, yourself and admins cannot receive transfers. Groups only. |
 | `/rps rock 10` | Rock, paper, scissors with a bet in REP (also accepts Russian words: камень, ножницы, бумага) |
 | `/portrait` | Humorous psychological portrait (needs at least 3 messages, 10 minute cooldown) |
+
+REP sources: +1 for chat activity (once per 5 minutes, max 10 per day), `/daily`, transfers and games. REP sinks: `/draw`, bets and transfers.
+
+### Chat tools
+
+| Command | Description |
+| --- | --- |
+| `/tldr` | Short retelling of the last 30 messages of the chat. `/tldr 50` takes more, from 5 up to 40 (the size of the stored feed). One summary per 2 minutes per chat. Groups only. |
+| `/roll` | Random number from 1 to 100. `/roll 20` gives 1 to 20, `/roll 2d6` two six-sided dice, `/roll 3d6+2` three dice plus 2. Up to 20 dice. The Russian forms `2к6` and `2д6` also work. |
+| `/8ball question` | Magic 8-ball with 20 classic answers |
+| `/choose a \| b \| c` | Picks one of the options. Options can also be separated by the word "или": `/choose sleep или code`. |
+
+`/roll`, `/8ball` and `/choose` silently ignore a user who calls them more often than once per 2 seconds.
 
 ### Images and memes
 
 | Command | Description |
 | --- | --- |
-| `/draw description` | Generate an image. Costs 15 REP, refunded if generation fails. English prompts usually work best, but Russian ones are translated automatically. |
-| `/meme template \| text 1 \| text 2` | Create a meme, for example `/meme drake \| Writing code by hand \| Copilot`. Templates with more fields take more texts: `/meme expanding \| a \| b \| c \| d`. |
+| `/draw description` | Generate an image. Costs 15 REP, refunded if generation fails. 30 second cooldown and 10 images per day per user. English prompts usually work best, but Russian ones are translated automatically. |
+| `/meme template \| text 1 \| text 2` | Create a meme, for example `/meme drake \| Writing code by hand \| Copilot`. Templates with more fields take more texts: `/meme expanding \| a \| b \| c \| d`. 20 second cooldown. |
 | `/memes` | List of built-in template names |
 
 A template can be given as a short name from `/memes`, a numeric imgflip template ID, or a name from the imgflip top 100, for example `/meme Two Buttons | Sleep | Write code`. Memes made with a free imgflip account carry a watermark.
@@ -167,15 +187,50 @@ A template can be given as a short name from `/memes`, a numeric imgflip templat
 | `/rep_add @username 10 reason` | Add REP |
 | `/rep_remove @username 5 reason` | Remove REP |
 | `/rep_set @username 100 reason` | Set REP to an exact value |
+| `/spont` | Show the spontaneous reply settings of the chat |
+| `/spont on` / `/spont off` | Turn spontaneous replies on or off |
+| `/spont 25` | Set the chance of a spontaneous reply to 25% (and turn it on) |
+| `/test_spont` | The next message of 5 or more characters gets a spontaneous reply for sure |
+| `/show_context` | Show the last 10 messages the bot has in its chat feed |
 
 The user can be given as `@username`, a first name, or a numeric ID (the user must have written in the chat at least once for username and name lookup). You can also reply to a user's message and write `/rep_add 10 reason`.
+
+`/spont`, `/test_spont` and `/show_context` work only for chat admins. For everyone else `/test_spont` and `/show_context` get no reply at all. The `/spont` settings are saved per chat.
+
+## Anti-spam and limits
+
+| What | Limit |
+| --- | --- |
+| AI replies | 1 per 3 seconds per user (the first extra message gets a warning, the rest are ignored) |
+| `/meme` | 1 per 20 seconds per user |
+| `/draw` | 1 per 30 seconds and 10 per day per user |
+| Personality switch | 1 per 2 minutes per chat for non-admins |
+| `/give` | 5 seconds between transfers, 100 REP per day (admins exempt) |
+| `/tldr` | 1 per 2 minutes per chat |
+| `/roll`, `/8ball`, `/choose` | 1 per 2 seconds per user, extra calls are ignored |
+| `/portrait` | 1 per 10 minutes |
+
+Spontaneous replies are not affected by these cooldowns, they have their own random pause.
+
+## Data and persistence
+
+Runtime data lives in the `data/` folder and is not committed:
+
+| File | Contents |
+| --- | --- |
+| `data/reputation.json` | Profiles, REP, daily streaks, transfer and draw counters, transaction history |
+| `data/state.json` | Conversation history and current personality per chat, the chat feed used for `/tldr` and spontaneous replies, messages for `/portrait`, per-chat settings such as `/spont` |
+
+Both files are written with a short delay (5 seconds after the last change) to avoid writing to disk on every message, and are flushed on `Ctrl+C`, `SIGTERM` and normal exit. If the process is killed with `kill -9` or the machine loses power, the last few seconds of changes can be lost.
+
+The silence timers of spontaneous replies are not saved. After a restart the bot waits a fresh random pause (30 minutes to 3 hours) in every chat before it may jump in.
 
 ## Project structure
 
 ```
 .
 ├── index.js          # Main bot code
-├── data/             # Runtime data (reputation.json), not committed
+├── data/             # Runtime data (reputation.json, state.json), not committed
 ├── .env              # Secrets, not committed
 ├── .env.example      # Template for .env
 ├── package.json
@@ -185,15 +240,29 @@ The user can be given as `@username`, a first name, or a numeric ID (the user mu
 ## Customization
 
 - **Add a personality.** Add a new object to `characters` in `index.js` (emoji, name, description, switch message, prompt) and put its key into `CHARACTER_GROUPS`. The command is created automatically.
-- **Add a trigger.** Add an entry to the `triggers` array. Use `word('phrase')` for the pattern, and list variants with `|`, for example `word('hi|hello')`.
+- **Add a trigger.** Add an entry to the `triggers` array. Use `word('phrase')` for the pattern and list variants with `|`, for example `word('hi|hello')`. Put several strings into `replies` to get a random one. The optional `chance` field (0 to 1) makes the trigger fire only part of the time, for example `chance: 0.5`.
 - **Add a meme template.** Add an entry to `MEME_TEMPLATES` with the imgflip template ID, a title and optionally the number of text boxes.
 - **Change global behavior.** Edit `BASE_SYSTEM_PROMPT`. It applies to every personality.
-- **Change limits.** `MEMORY_SIZE`, `MAX_ANSWER_LENGTH`, `TRIGGER_COOLDOWN`, `PORTRAIT_COOLDOWN`, `DRAW_COST` and the `SPONTANEOUS_*` constants are near the top of the relevant sections.
+- **Change limits.** All limits are constants near the top of the relevant sections of `index.js`:
+  - Memory and replies: `MEMORY_SIZE`, `MAX_ANSWER_LENGTH`, `CHAT_FEED_LIMIT`, `CHAT_CONTEXT_MESSAGES`
+  - Spontaneous replies: `SPONTANEOUS_MIN_DELAY`, `SPONTANEOUS_MAX_DELAY`, `SPONTANEOUS_CHANCE` (the default, per-chat value is set with `/spont`)
+  - Anti-spam: `AI_COOLDOWN`, `MEME_COOLDOWN`, `DRAW_COOLDOWN`, `DRAW_DAILY_LIMIT`, `PERSONA_COOLDOWN`, `TRIGGER_COOLDOWN`, `PORTRAIT_COOLDOWN`, `FUN_COOLDOWN`
+  - Economy: `DRAW_COST`, `DAILY_BASE`, `DAILY_STREAK_BONUS`, `DAILY_STREAK_BONUS_CAP`, `GIVE_DAILY_LIMIT`, `GIVE_COOLDOWN`
+  - Summary: `TLDR_COOLDOWN`, `TLDR_DEFAULT_MESSAGES`, `TLDR_MIN_MESSAGES`
+  - Saving: `REPUTATION_SAVE_DELAY`, `STATE_SAVE_DELAY`
 - **Tune search routing.** `COMPLEX_QUERY_PATTERN` and `isComplexQuery` decide which `/search` queries go to Tavily first.
+
+## Troubleshooting
+
+- **The bot ignores trigger words and never jumps in on its own.** Privacy mode is still on. Follow the steps in "Telegram setup" and re-add the bot to the group.
+- **"Лимит Groq превышен".** The free Groq tier hit its rate limit. Wait a minute. The cooldowns above exist to make this rarer.
+- **`/draw` says the daily limit is reached.** Cloudflare's free allocation resets at 00:00 UTC. The REP is refunded.
+- **`/daily` or `/give` refuses to work.** They need a normal user account in a group. They do not work in private chats or when a message is sent on behalf of the chat (anonymous admin mode).
 
 ## Notes
 
-- Reputation data is stored locally in `data/reputation.json`. Back it up if it matters to you.
+- Reputation and state data are stored locally in `data/`. Back them up if they matter to you.
+- Add `data/` and `*.db` to `.gitignore` so chat data never ends up in the repository.
 - The bot allows profanity and dark humor by design. Use it in chats where everyone is fine with that.
 - Keep your API keys private. If a key ever leaks, revoke it and create a new one.
 
